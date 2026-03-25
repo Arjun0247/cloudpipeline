@@ -1,0 +1,70 @@
+name: CD — Deploy to Azure
+
+on:
+  workflow_run:
+    workflows: ["CI — Lint, Test & Build"]
+    types: [completed]
+    branches: [main]
+
+  # Also allow manual trigger with a specific image tag for rollbacks
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Docker image tag to deploy (default: latest)'
+        required: false
+        default: 'latest'
+
+jobs:
+  deploy:
+    name: Deploy to Azure App Service
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+
+    environment:
+      name: production
+      url: ${{ steps.deploy.outputs.webapp-url }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Log in to Azure
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Set image tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "tag=${{ github.event.inputs.image_tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${{ github.sha }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Deploy Server to Azure Web App
+        id: deploy
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ secrets.AZURE_WEBAPP_NAME_SERVER }}
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/cloudpipeline-server:${{ steps.tag.outputs.tag }}
+
+      - name: Deploy Client to Azure Web App
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ secrets.AZURE_WEBAPP_NAME_CLIENT }}
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/cloudpipeline-client:${{ steps.tag.outputs.tag }}
+
+      - name: Smoke test — health check
+        run: |
+          sleep 15
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://${{ secrets.AZURE_WEBAPP_NAME_SERVER }}.azurewebsites.net/health)
+          if [ "$STATUS" != "200" ]; then
+            echo "Health check failed with status $STATUS"
+            exit 1
+          fi
+          echo "Health check passed!"
+
+      - name: Log out of Azure
+        if: always()
+        run: az logout
